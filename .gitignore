@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Env files / secrets
+.env
+.env.*
