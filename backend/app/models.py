@@ -1,12 +1,25 @@
 import uuid
-from sqlalchemy import String, DateTime, Integer, Numeric, ForeignKey, JSON, Enum
+from datetime import datetime
+
+from sqlalchemy import (
+    String,
+    DateTime,
+    Integer,
+    Numeric,
+    ForeignKey,
+    JSON,
+    Enum,
+    CheckConstraint,
+    Index,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from datetime import datetime
+
 from .db import Base
 
 RunStatus = Enum("running", "passed", "failed", "error", name="run_status")
 StepStatus = Enum("ok", "error", name="step_status")
+
 
 class Run(Base):
     __tablename__ = "runs"
@@ -25,11 +38,24 @@ class Run(Base):
 
     steps: Mapped[list["Step"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
+    __table_args__ = (
+        CheckConstraint("total_tokens >= 0", name="ck_runs_total_tokens_nonneg"),
+        CheckConstraint("total_cost_usd >= 0", name="ck_runs_total_cost_nonneg"),
+    )
+
+
 class Step(Base):
     __tablename__ = "steps"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("runs.id"), index=True, nullable=True)
+
+    # IMPORTANT: align typing with nullable=True
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
 
     index: Mapped[int] = mapped_column(Integer, index=True)
     name: Mapped[str] = mapped_column(String, index=True)
@@ -48,3 +74,19 @@ class Step(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     run: Mapped["Run"] = relationship(back_populates="steps")
+
+    __table_args__ = (
+        CheckConstraint("latency_ms >= 0", name="ck_steps_latency_nonneg"),
+        CheckConstraint("tokens >= 0", name="ck_steps_tokens_nonneg"),
+        CheckConstraint("cost_usd >= 0", name="ck_steps_cost_nonneg"),
+
+        # Unique (run_id, index) ONLY when run_id is not null.
+        # This allows placeholders created by step.end-first (run_id NULL).
+        Index(
+            "uq_steps_run_id_index_notnull",
+            "run_id",
+            "index",
+            unique=True,
+            postgresql_where=(run_id.isnot(None)),
+        ),
+    )

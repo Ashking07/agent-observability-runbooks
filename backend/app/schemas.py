@@ -1,28 +1,33 @@
-from pydantic import BaseModel, Field
-from typing import Any, Literal, Optional, Union
-from uuid import UUID
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Annotated
-from pydantic import Field
+from typing import Annotated, Literal, Optional, Union
+from uuid import UUID
+
+from pydantic import BaseModel, Field
 
 
 # ----- Event input models -----
 
 EventType = Literal["run.start", "run.end", "step.start", "step.end"]
 
+
 class BaseEvent(BaseModel):
     type: EventType
     run_id: UUID
     ts: datetime
+
 
 class RunStartEvent(BaseEvent):
     type: Literal["run.start"]
     project_id: str
     runbook: Optional[str] = None
 
+
 class RunEndEvent(BaseEvent):
     type: Literal["run.end"]
     totals: dict = Field(default_factory=dict)  # e.g. {"tokens": 123, "cost_usd": 0.01}
+
 
 class StepStartEvent(BaseEvent):
     type: Literal["step.start"]
@@ -32,22 +37,26 @@ class StepStartEvent(BaseEvent):
     tool: str
     input: dict = Field(default_factory=dict)
 
+
 class StepEndEvent(BaseEvent):
     type: Literal["step.end"]
     step_id: UUID
     output: dict = Field(default_factory=dict)
-    latency_ms: int = 0
-    tokens: int = 0
+    latency_ms: int = Field(default=0, ge=0)
+    tokens: int = Field(default=0, ge=0)
     cost_usd: float = 0.0
     status: Literal["ok", "error"] = "ok"
+
 
 Event = Annotated[
     Union[RunStartEvent, RunEndEvent, StepStartEvent, StepEndEvent],
     Field(discriminator="type"),
 ]
 
+
 class EventsIn(BaseModel):
     events: list[Event]
+
 
 # ----- Output models -----
 
@@ -60,6 +69,7 @@ class RunOut(BaseModel):
     ended_at: Optional[datetime]
     total_tokens: int
     total_cost_usd: float
+
 
 class StepOut(BaseModel):
     id: UUID
@@ -74,6 +84,7 @@ class StepOut(BaseModel):
     output_json: dict
     started_at: datetime
     ended_at: Optional[datetime]
+
 
 class RunDetailOut(RunOut):
     steps: list[StepOut]

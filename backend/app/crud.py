@@ -94,13 +94,24 @@ def upsert_step_start(
             started_at=ts,
         )
         db.add(step)
-    else:
-        step.run_id = run_id
-        step.index = index
-        step.name = name
-        step.tool = tool
+        return step
+
+    # If this step was a placeholder created by step.end-first, fill in missing fields.
+    # If the step already has real values, we still allow updates (idempotent retries),
+    # but we avoid overwriting timestamps that already exist.
+    step.run_id = run_id
+    step.index = index
+    step.name = name
+    step.tool = tool
+
+    # Only set input_json if it's empty / placeholder-like.
+    if not step.input_json:
         step.input_json = input_obj or {}
+
+    # "No time travel": don't overwrite started_at once it is set.
+    if step.started_at is None:
         step.started_at = ts
+
     return step
 
 
@@ -113,17 +124,39 @@ def apply_step_end(
     cost_usd: float,
     status: str,
     ts: datetime,
-) -> Step:
+) -> tuple[Step, bool]:
+    """
+    Returns: (step, created_placeholder)
+    """
     step = db.scalar(select(Step).where(Step.id == step_id))
-    if step is None:
-        # For MVP: require step.start first to know run_id/index/name/tool.
-        raise ValueError(f"step.end received for unknown step_id={step_id}. Send step.start first.")
+    created_placeholder = False
 
-    step.output_json = output_obj or {}
+    if step is None:
+        created_placeholder = True
+        step = Step(
+            id=step_id,
+            run_id=None,
+            index=-1,
+            name="unknown",
+            tool="unknown",
+            input_json={},
+            status=status,
+            started_at=ts,
+        )
+        db.add(step)
+
+    # If retries happen, do not erase prior data with empty dicts.
+    if output_obj:
+        step.output_json = output_obj
+
+    # "No time travel": don't overwrite ended_at once set.
+    if step.ended_at is None:
+        step.ended_at = ts
+
+    # Keep metrics idempotent; if you re-receive the same end event, values should match.
     step.latency_ms = int(latency_ms or 0)
     step.tokens = int(tokens or 0)
     step.cost_usd = float(cost_usd or 0.0)
     step.status = status
-    step.ended_at = ts
 
-    return step
+    return step, created_placeholder

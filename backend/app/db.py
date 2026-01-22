@@ -1,8 +1,7 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
-from .settings import Settings
-settings = Settings()
 
+from .settings import settings  # use the shared settings instance
 
 engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
 

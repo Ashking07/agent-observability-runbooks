@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from sqlalchemy import select, case
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 from uuid import UUID
 
 from ..db import get_db
@@ -10,22 +10,26 @@ from ..schemas import RunOut, RunDetailOut, StepOut
 
 router = APIRouter(prefix="/v1", tags=["runs"])
 
-def require_api_key(x_api_key: str | None):
+
+def require_api_key(x_api_key: str | None = Header(default=None)):
     if x_api_key != settings.API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-@router.get("/runs", response_model=list[RunOut])
-def list_runs(
-    project_id: str | None = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=200),
-    db: Session = Depends(get_db),
-    x_api_key: str | None = Header(default=None),
-):
-    require_api_key(x_api_key)
 
-    q = select(Run).order_by(Run.started_at.desc()).limit(limit)
-    if project_id:
-        q = q.where(Run.project_id == project_id)
+@router.get("/runs", response_model=list[RunOut], dependencies=[Depends(require_api_key)])
+def list_runs(
+    project_id: str = Query(..., description="Project identifier (required)"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    q = (
+        select(Run)
+        .where(Run.project_id == project_id)
+        .order_by(Run.started_at.desc(), Run.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
 
     runs = db.scalars(q).all()
 
@@ -43,20 +47,23 @@ def list_runs(
         for r in runs
     ]
 
-@router.get("/runs/{run_id}", response_model=RunDetailOut)
+
+@router.get("/runs/{run_id}", response_model=RunDetailOut, dependencies=[Depends(require_api_key)])
 def get_run(
     run_id: UUID,
     db: Session = Depends(get_db),
-    x_api_key: str | None = Header(default=None),
 ):
-    require_api_key(x_api_key)
-
     r = db.get(Run, run_id)
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
+    # Placeholders (index < 0) go last; real steps (index >= 0) ordered ascending.
+    placeholder_last = case((Step.index < 0, 1), else_=0)
+
     steps = db.scalars(
-        select(Step).where(Step.run_id == run_id).order_by(Step.index.asc())
+        select(Step)
+        .where(Step.run_id == run_id)
+        .order_by(placeholder_last.asc(), Step.index.asc(), Step.started_at.asc(), Step.id.asc())
     ).all()
 
     return RunDetailOut(
