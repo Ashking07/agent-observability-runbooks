@@ -117,6 +117,7 @@ def upsert_step_start(
 
 def apply_step_end(
     db: Session,
+    run_id: UUID,
     step_id: UUID,
     output_obj: dict,
     latency_ms: int,
@@ -127,6 +128,7 @@ def apply_step_end(
 ) -> tuple[Step, bool]:
     """
     Returns: (step, created_placeholder)
+    created_placeholder=True means we received step.end before step.start.
     """
     step = db.scalar(select(Step).where(Step.id == step_id))
     created_placeholder = False
@@ -135,7 +137,7 @@ def apply_step_end(
         created_placeholder = True
         step = Step(
             id=step_id,
-            run_id=None,
+            run_id=run_id,      # <-- key change: attach to the run immediately
             index=-1,
             name="unknown",
             tool="unknown",
@@ -144,6 +146,17 @@ def apply_step_end(
             started_at=ts,
         )
         db.add(step)
+    else:
+        # If this step was previously created as a placeholder with run_id NULL,
+        # we can attach it now. If it already has a run_id, we do NOT overwrite it.
+        if step.run_id is None:
+            step.run_id = run_id
+        elif step.run_id != run_id:
+            # Defensive: same step_id should not belong to a different run.
+            raise ValueError(
+                f"step_id={step_id} is already associated with run_id={step.run_id}, "
+                f"cannot apply step.end for run_id={run_id}"
+            )
 
     # If retries happen, do not erase prior data with empty dicts.
     if output_obj:
@@ -153,7 +166,6 @@ def apply_step_end(
     if step.ended_at is None:
         step.ended_at = ts
 
-    # Keep metrics idempotent; if you re-receive the same end event, values should match.
     step.latency_ms = int(latency_ms or 0)
     step.tokens = int(tokens or 0)
     step.cost_usd = float(cost_usd or 0.0)

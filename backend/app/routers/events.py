@@ -47,6 +47,7 @@ def ingest_events(
             elif ev.type == "step.end":
                 _step, created_placeholder = crud.apply_step_end(
                     db,
+                    ev.run_id,    
                     ev.step_id,
                     ev.output,
                     ev.latency_ms,
@@ -60,6 +61,7 @@ def ingest_events(
                         {
                             "index": i,
                             "type": "step.end",
+                            "run_id": str(ev.run_id),
                             "step_id": str(ev.step_id),
                             "warning": "step_end_before_step_start_placeholder_created",
                         }
