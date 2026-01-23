@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select, case
 from sqlalchemy.orm import Session
-import json
 from typing import Any, Optional
 from pydantic import BaseModel
 import yaml
 from uuid import UUID
+import hashlib
+import json
 
 from ..db import get_db
 from ..schemas import RunOut, RunDetailOut, StepOut, RunValidationOut, RunValidationListOut
@@ -37,36 +38,48 @@ class ValidateRunOut(BaseModel):
 
 
 
-@router.get("/runs", response_model=list[RunOut], dependencies=[Depends(require_api_key)])
+@router.get("/runs", response_model=list[RunOut])
 def list_runs(
-    project_id: str = Query(..., description="Project identifier (required)"),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    project_id: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),  # add offset if you want (optional)
     db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None),
 ):
-    q = (
-        select(Run)
-        .where(Run.project_id == project_id)
-        .order_by(Run.started_at.desc(), Run.id.desc())
-        .limit(limit)
-        .offset(offset)
-    )
+    require_api_key(x_api_key)
+
+    q = select(Run).order_by(Run.started_at.desc()).limit(limit).offset(offset)
+    if project_id:
+        q = q.where(Run.project_id == project_id)
 
     runs = db.scalars(q).all()
 
-    return [
-        RunOut(
-            id=r.id,
-            project_id=r.project_id,
-            runbook=r.runbook,
-            status=r.status,
-            started_at=r.started_at,
-            ended_at=r.ended_at,
-            total_tokens=r.total_tokens,
-            total_cost_usd=float(r.total_cost_usd or 0),
+    out: list[RunOut] = []
+    for r in runs:
+        latest = db.scalars(
+            select(RunValidation)
+            .where(RunValidation.run_id == r.id)
+            .order_by(RunValidation.created_at.desc())
+            .limit(1)
+        ).first()
+
+        out.append(
+            RunOut(
+                id=r.id,
+                project_id=r.project_id,
+                runbook=r.runbook,
+                status=r.status,
+                started_at=r.started_at,
+                ended_at=r.ended_at,
+                total_tokens=r.total_tokens,
+                total_cost_usd=float(r.total_cost_usd or 0),
+                latest_validation_id=(latest.id if latest else None),
+                latest_validation_status=(latest.status if latest else None),
+                latest_validation_at=(latest.created_at if latest else None),
+            )
         )
-        for r in runs
-    ]
+
+    return out
 
 
 @router.get("/runs/{run_id}", response_model=RunDetailOut, dependencies=[Depends(require_api_key)])
@@ -165,15 +178,27 @@ def validate_run(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    # Get steps in deterministic order (same ordering logic as get_run)
+    # 1) Load steps first (deterministic order)
     placeholder_last = case((Step.index < 0, 1), else_=0)
     steps = db.scalars(
         select(Step)
         .where(Step.run_id == run_id)
-        .order_by(placeholder_last.asc(), Step.index.asc(), Step.started_at.asc(), Step.id.asc())
+        .order_by(
+            placeholder_last.asc(),
+            Step.index.asc(),
+            Step.started_at.asc(),
+            Step.id.asc(),
+        )
     ).all()
 
-    # Load runbook YAML: prefer request body, else stored run.runbook
+    # 2) Compute totals (prefer Run totals; else compute from steps)
+    total_tokens = int(run.total_tokens or 0)
+    total_cost = float(run.total_cost_usd or 0.0)
+    if total_tokens == 0 and total_cost == 0.0:
+        total_tokens = sum(int(s.tokens or 0) for s in steps)
+        total_cost = sum(float(s.cost_usd or 0.0) for s in steps)
+
+    # 3) Load runbook text (request body > stored run.runbook)
     runbook_text = (payload.runbook_yaml or (run.runbook or "")).strip()
     if not runbook_text:
         return ValidateRunOut(
@@ -187,6 +212,7 @@ def validate_run(
             summary={"run_id": str(run_id)},
         )
 
+    # 4) Parse YAML
     try:
         runbook = yaml.safe_load(runbook_text) or {}
         if not isinstance(runbook, dict):
@@ -204,14 +230,55 @@ def validate_run(
             summary={"run_id": str(run_id)},
         )
 
+    # 5) Build deterministic signature + input_hash (NOW all vars exist)
+    signature = {
+        "run_id": str(run_id),
+        "runbook_yaml": runbook_text,
+        "total_tokens": total_tokens,
+        "total_cost_usd": total_cost,
+        "steps": [
+            {
+                "id": str(s.id),
+                "index": s.index,
+                "name": s.name,
+                "tool": s.tool,
+                "status": s.status,
+                "tokens": int(s.tokens or 0),
+                "cost_usd": float(s.cost_usd or 0.0),
+                "ended_at": (s.ended_at.isoformat() if s.ended_at else None),
+            }
+            for s in steps
+        ],
+    }
+    input_hash = hashlib.sha256(
+        json.dumps(signature, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    # 6) Idempotency: return existing validation if same input_hash
+    existing = db.scalars(
+        select(RunValidation)
+        .where(
+            RunValidation.run_id == run_id,
+            RunValidation.input_hash == input_hash,
+        )
+        .limit(1)
+    ).first()
+
+    if existing:
+        return ValidateRunOut(
+            status=existing.status,
+            reasons=[ValidationReason(**x) for x in (existing.reasons_json or [])],
+            summary=(existing.summary_json or {"run_id": str(run_id)}),
+        )
+
+    # 7) Evaluate rules
     reasons: list[ValidationReason] = []
 
-    # ---- Rule 1: allowed_tools ----
+    # Rule 1: allowed_tools
     allowed_tools = runbook.get("allowed_tools")
     if isinstance(allowed_tools, list):
         allowed_set = set(str(x) for x in allowed_tools)
         for s in steps:
-            # ignore placeholders with unknown tool
             if s.tool and s.tool != "unknown" and s.tool not in allowed_set:
                 reasons.append(
                     ValidationReason(
@@ -221,38 +288,37 @@ def validate_run(
                     )
                 )
 
-    # ---- Rule 2: required_steps (subsequence by name) ----
+    # Rule 2: required_steps subsequence by name
     required_steps = runbook.get("required_steps")
     if isinstance(required_steps, list):
-        required_names = [str(x.get("name")) for x in required_steps if isinstance(x, dict) and x.get("name")]
+        required_names = [
+            str(x.get("name"))
+            for x in required_steps
+            if isinstance(x, dict) and x.get("name")
+        ]
         observed_names = [s.name for s in steps if s.name]
 
-        # Check subsequence order
         j = 0
         for name in observed_names:
             if j < len(required_names) and name == required_names[j]:
                 j += 1
         if j < len(required_names):
-            missing = required_names[j:]
             reasons.append(
                 ValidationReason(
                     code="required_steps_missing_or_out_of_order",
                     message="Required steps missing or out of order.",
-                    details={"required_sequence": required_names, "missing_suffix": missing, "observed": observed_names},
+                    details={
+                        "required_sequence": required_names,
+                        "missing_suffix": required_names[j:],
+                        "observed": observed_names,
+                    },
                 )
             )
 
-    # ---- Rule 3: budgets ----
+    # Rule 3: budgets
     budgets = runbook.get("budgets") if isinstance(runbook.get("budgets"), dict) else {}
     max_tokens = budgets.get("max_total_tokens")
     max_cost = budgets.get("max_total_cost_usd")
-
-    # Prefer Run totals if set; otherwise compute from steps
-    total_tokens = int(run.total_tokens or 0)
-    total_cost = float(run.total_cost_usd or 0.0)
-    if total_tokens == 0 and total_cost == 0.0:
-        total_tokens = sum(int(s.tokens or 0) for s in steps)
-        total_cost = sum(float(s.cost_usd or 0.0) for s in steps)
 
     if max_tokens is not None:
         try:
@@ -294,7 +360,7 @@ def validate_run(
 
     status = "passed" if len(reasons) == 0 else "failed"
 
-    # Persist validation result
+    # 8) Persist
     reasons_payload = [reason.model_dump() for reason in reasons]
     summary_payload = {
         "run_id": str(run_id),
@@ -307,6 +373,7 @@ def validate_run(
     val = RunValidation(
         run_id=run_id,
         status=status,
+        input_hash=input_hash,
         reasons_json=reasons_payload,
         summary_json=summary_payload,
         runbook_yaml=runbook_text,

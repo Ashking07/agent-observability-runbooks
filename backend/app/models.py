@@ -15,6 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+import hashlib  # (not required here but later)
 
 from .db import Base
 
@@ -125,3 +126,10 @@ class RunValidation(Base):
 
     # Store the runbook text used for this validation (useful for audit / debugging)
     runbook_yaml: Mapped[str] = mapped_column(Text, default="") # Store as text for simplicity: modified by own.
+
+    input_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 hex
+
+    __table_args__ = (
+    Index("uq_run_validations_run_id_input_hash", "run_id", "input_hash", unique=True),
+    )
+

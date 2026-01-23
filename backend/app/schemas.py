@@ -70,6 +70,11 @@ class RunOut(BaseModel):
     total_tokens: int
     total_cost_usd: float
 
+    # NEW (latest validation info)
+    latest_validation_id: Optional[UUID] = None
+    latest_validation_status: Optional[str] = None
+    latest_validation_at: Optional[datetime] = None
+
 
 class StepOut(BaseModel):
     id: UUID
