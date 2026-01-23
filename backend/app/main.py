@@ -7,6 +7,8 @@ from .settings import settings
 from .db import SessionLocal
 from .routers.events import router as events_router
 from .routers.runs import router as runs_router
+from .routers.projects import router as projects_router
+
 
 app = FastAPI(title="Agent Observability API", version="0.1")
 
@@ -20,6 +22,7 @@ app.add_middleware(
 
 app.include_router(events_router)
 app.include_router(runs_router)
+app.include_router(projects_router)
 
 @app.get("/health")
 def health():

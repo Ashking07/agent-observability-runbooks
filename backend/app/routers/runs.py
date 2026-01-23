@@ -1,3 +1,5 @@
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select, case
 from sqlalchemy.orm import Session
@@ -48,21 +50,41 @@ def list_runs(
 ):
     require_api_key(x_api_key)
 
-    q = select(Run).order_by(Run.started_at.desc()).limit(limit).offset(offset)
+    latest_val = (
+        select(
+            RunValidation.run_id.label("run_id"),
+            RunValidation.id.label("latest_validation_id"),
+            RunValidation.status.label("latest_validation_status"),
+            RunValidation.created_at.label("latest_validation_at"),
+        )
+        .distinct(RunValidation.run_id)
+        .order_by(RunValidation.run_id, RunValidation.created_at.desc())
+    ).subquery()
+
+
+    q = (
+        select(
+            Run,
+            latest_val.c.latest_validation_id,
+            latest_val.c.latest_validation_status,
+            latest_val.c.latest_validation_at,
+        )
+        .outerjoin(latest_val, latest_val.c.run_id == Run.id)
+        .order_by(Run.started_at.desc(), Run.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
     if project_id:
         q = q.where(Run.project_id == project_id)
+
+    rows = db.execute(q).all()
+
 
     runs = db.scalars(q).all()
 
     out: list[RunOut] = []
-    for r in runs:
-        latest = db.scalars(
-            select(RunValidation)
-            .where(RunValidation.run_id == r.id)
-            .order_by(RunValidation.created_at.desc())
-            .limit(1)
-        ).first()
-
+    for r, vid, vstatus, vat in rows:
         out.append(
             RunOut(
                 id=r.id,
@@ -73,12 +95,11 @@ def list_runs(
                 ended_at=r.ended_at,
                 total_tokens=r.total_tokens,
                 total_cost_usd=float(r.total_cost_usd or 0),
-                latest_validation_id=(latest.id if latest else None),
-                latest_validation_status=(latest.status if latest else None),
-                latest_validation_at=(latest.created_at if latest else None),
+                latest_validation_id=vid,
+                latest_validation_status=vstatus,
+                latest_validation_at=vat,
             )
         )
-
     return out
 
 
@@ -100,6 +121,14 @@ def get_run(
         .order_by(placeholder_last.asc(), Step.index.asc(), Step.started_at.asc(), Step.id.asc())
     ).all()
 
+    latest_val = db.scalars(
+    select(RunValidation)
+    .where(RunValidation.run_id == run_id)
+    .order_by(RunValidation.created_at.desc())
+    .limit(1)
+    ).first()
+
+
     return RunDetailOut(
         id=r.id,
         project_id=r.project_id,
@@ -109,6 +138,9 @@ def get_run(
         ended_at=r.ended_at,
         total_tokens=r.total_tokens,
         total_cost_usd=float(r.total_cost_usd or 0),
+        latest_validation_id=str(latest_val.id) if latest_val else None,
+        latest_validation_status=latest_val.status if latest_val else None,
+        latest_validation_at=latest_val.created_at if latest_val else None,
         steps=[
             StepOut(
                 id=s.id,
@@ -265,10 +297,17 @@ def validate_run(
     ).first()
 
     if existing:
+        summary = (existing.summary_json or {"run_id": str(run_id)})
+        summary["validation_id"] = str(existing.id)
+
+        if run.status != "error":
+            run.status = existing.status
+            db.commit()
+
         return ValidateRunOut(
             status=existing.status,
             reasons=[ValidationReason(**x) for x in (existing.reasons_json or [])],
-            summary=(existing.summary_json or {"run_id": str(run_id)}),
+            summary=summary,
         )
 
     # 7) Evaluate rules
@@ -370,6 +409,12 @@ def validate_run(
         "total_cost_usd": total_cost,
     }
 
+    # Reflect validation result onto the Run itself (simple MVP behavior).
+    # Keep "error" as highest priority (don't overwrite it).
+    if run.status != "error":
+        run.status = "passed" if status == "passed" else "failed"
+
+    # Persist validation row (idempotent)
     val = RunValidation(
         run_id=run_id,
         status=status,
@@ -379,13 +424,25 @@ def validate_run(
         runbook_yaml=runbook_text,
     )
     db.add(val)
-    db.commit()
-    db.refresh(val)
+
+    try:
+        db.commit()
+        db.refresh(val)
+    except IntegrityError:
+        db.rollback()
+        val = db.scalars(
+            select(RunValidation).where(
+                RunValidation.run_id == run_id,
+                RunValidation.input_hash == input_hash,
+            )
+        ).first()
+        if not val:
+            raise
+
+    # Reflect onto Run (single commit)
+    if run.status != "error":
+        run.status = "passed" if val.status == "passed" else "failed"
+        db.commit()
 
     summary_payload["validation_id"] = str(val.id)
-
-    return ValidateRunOut(
-        status=status,
-        reasons=reasons,
-        summary=summary_payload,
-    )
+    return ValidateRunOut(status=val.status, reasons=reasons, summary=summary_payload)
