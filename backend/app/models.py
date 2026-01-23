@@ -11,6 +11,7 @@ from sqlalchemy import (
     Enum,
     CheckConstraint,
     Index,
+    Text
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,6 +38,13 @@ class Run(Base):
     total_cost_usd: Mapped[float] = mapped_column(Numeric(10, 4), default=0)
 
     steps: Mapped[list["Step"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+    validations: Mapped[list["RunValidation"]] = relationship(
+    back_populates="run",
+    cascade="all, delete-orphan",
+    passive_deletes=True,
+    )
+
 
     __table_args__ = (
         CheckConstraint("total_tokens >= 0", name="ck_runs_total_tokens_nonneg"),
@@ -90,3 +98,30 @@ class Step(Base):
             postgresql_where=(run_id.isnot(None)),
         ),
     )
+
+
+class RunValidation(Base):
+    __tablename__ = "run_validations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+
+    run: Mapped["Run"] = relationship(back_populates="validations")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+
+    # Keep status as string for MVP to avoid Postgres ENUM migration complexity
+    status: Mapped[str] = mapped_column(String, index=True)  # "passed" | "failed"
+
+    # Store the computed output so dashboard/history can show reasons
+    reasons_json: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Store the runbook text used for this validation (useful for audit / debugging)
+    runbook_yaml: Mapped[str] = mapped_column(Text, default="") # Store as text for simplicity: modified by own.

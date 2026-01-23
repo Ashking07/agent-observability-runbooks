@@ -8,9 +8,9 @@ import yaml
 from uuid import UUID
 
 from ..db import get_db
+from ..schemas import RunOut, RunDetailOut, StepOut, RunValidationOut, RunValidationListOut
+from ..models import Run, Step, RunValidation
 from ..settings import settings
-from ..models import Run, Step
-from ..schemas import RunOut, RunDetailOut, StepOut
 
 router = APIRouter(prefix="/v1", tags=["runs"])
 
@@ -115,6 +115,41 @@ def get_run(
         ],
     )
 
+@router.get("/runs/{run_id}/validations", response_model=RunValidationListOut)
+def list_run_validations(
+    run_id: UUID,
+    limit: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None),
+):
+    require_api_key(x_api_key)
+
+    # Confirm the run exists (better error)
+    r = db.get(Run, run_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    vals = db.scalars(
+        select(RunValidation)
+        .where(RunValidation.run_id == run_id)
+        .order_by(RunValidation.created_at.desc())
+        .limit(limit)
+    ).all()
+
+    return RunValidationListOut(
+        validations=[
+            RunValidationOut(
+                id=v.id,
+                run_id=v.run_id,
+                status=v.status,
+                created_at=v.created_at,
+                reasons_json=v.reasons_json or [],
+                summary_json=v.summary_json or {},
+            )
+            for v in vals
+        ]
+    )
+
 
 @router.post(
     "/runs/{run_id}/validate",
@@ -126,8 +161,8 @@ def validate_run(
     payload: ValidateRunIn,
     db: Session = Depends(get_db),
 ):
-    r = db.get(Run, run_id)
-    if not r:
+    run = db.get(Run, run_id)
+    if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
     # Get steps in deterministic order (same ordering logic as get_run)
@@ -139,7 +174,7 @@ def validate_run(
     ).all()
 
     # Load runbook YAML: prefer request body, else stored run.runbook
-    runbook_text = (payload.runbook_yaml or (r.runbook or "")).strip()
+    runbook_text = (payload.runbook_yaml or (run.runbook or "")).strip()
     if not runbook_text:
         return ValidateRunOut(
             status="failed",
@@ -213,8 +248,8 @@ def validate_run(
     max_cost = budgets.get("max_total_cost_usd")
 
     # Prefer Run totals if set; otherwise compute from steps
-    total_tokens = int(r.total_tokens or 0)
-    total_cost = float(r.total_cost_usd or 0.0)
+    total_tokens = int(run.total_tokens or 0)
+    total_cost = float(run.total_cost_usd or 0.0)
     if total_tokens == 0 and total_cost == 0.0:
         total_tokens = sum(int(s.tokens or 0) for s in steps)
         total_cost = sum(float(s.cost_usd or 0.0) for s in steps)
@@ -258,14 +293,32 @@ def validate_run(
             )
 
     status = "passed" if len(reasons) == 0 else "failed"
+
+    # Persist validation result
+    reasons_payload = [reason.model_dump() for reason in reasons]
+    summary_payload = {
+        "run_id": str(run_id),
+        "project_id": run.project_id,
+        "steps_count": len(steps),
+        "total_tokens": total_tokens,
+        "total_cost_usd": total_cost,
+    }
+
+    val = RunValidation(
+        run_id=run_id,
+        status=status,
+        reasons_json=reasons_payload,
+        summary_json=summary_payload,
+        runbook_yaml=runbook_text,
+    )
+    db.add(val)
+    db.commit()
+    db.refresh(val)
+
+    summary_payload["validation_id"] = str(val.id)
+
     return ValidateRunOut(
         status=status,
         reasons=reasons,
-        summary={
-            "run_id": str(run_id),
-            "project_id": r.project_id,
-            "steps_count": len(steps),
-            "total_tokens": total_tokens,
-            "total_cost_usd": total_cost,
-        },
+        summary=summary_payload,
     )

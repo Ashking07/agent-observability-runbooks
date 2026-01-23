@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from pydantic import BaseModel, Field
+from uuid import UUID
 from datetime import datetime
 from typing import Annotated, Literal, Optional, Union
-from uuid import UUID
 
-from pydantic import BaseModel, Field
 
 
 # ----- Event input models -----
@@ -88,3 +88,14 @@ class StepOut(BaseModel):
 
 class RunDetailOut(RunOut):
     steps: list[StepOut]
+
+class RunValidationOut(BaseModel):
+    id: UUID
+    run_id: UUID
+    status: str  # "passed" | "failed"
+    created_at: datetime
+    reasons_json: list[dict]
+    summary_json: dict
+
+class RunValidationListOut(BaseModel):
+    validations: list[RunValidationOut]
