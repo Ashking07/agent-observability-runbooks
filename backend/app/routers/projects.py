@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
+from ..models import Run, RunValidation
+from ..schemas import RunOut
+
 
 from ..db import get_db
 from ..settings import settings
@@ -25,6 +28,65 @@ def list_projects(
     ).all()
 
     return {"projects": [r[0] for r in rows]}
+
+
+@router.get("/projects/{project_id}/runs", response_model=list[RunOut])
+def project_runs_feed(
+    project_id: str,
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    x_api_key: str | None = Header(default=None),
+):
+    require_api_key(x_api_key)
+
+    # Latest validation per run (same logic as /v1/runs)
+    latest_val = (
+        select(
+            RunValidation.run_id.label("run_id"),
+            RunValidation.id.label("latest_validation_id"),
+            RunValidation.status.label("latest_validation_status"),
+            RunValidation.created_at.label("latest_validation_at"),
+        )
+        .distinct(RunValidation.run_id)
+        .order_by(RunValidation.run_id, RunValidation.created_at.desc())
+        .subquery()
+    )
+
+    q = (
+        select(
+            Run,
+            latest_val.c.latest_validation_id,
+            latest_val.c.latest_validation_status,
+            latest_val.c.latest_validation_at,
+        )
+        .outerjoin(latest_val, latest_val.c.run_id == Run.id)
+        .where(Run.project_id == project_id)
+        .order_by(Run.started_at.desc(), Run.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    rows = db.execute(q).all()
+
+    out: list[RunOut] = []
+    for r, vid, vstatus, vat in rows:
+        out.append(
+            RunOut(
+                id=r.id,
+                project_id=r.project_id,
+                runbook=r.runbook,
+                status=r.status,
+                started_at=r.started_at,
+                ended_at=r.ended_at,
+                total_tokens=r.total_tokens,
+                total_cost_usd=float(r.total_cost_usd or 0),
+                latest_validation_id=vid,
+                latest_validation_status=vstatus,
+                latest_validation_at=vat,
+            )
+        )
+    return out
 
 
 @router.get("/projects/{project_id}/summary")
