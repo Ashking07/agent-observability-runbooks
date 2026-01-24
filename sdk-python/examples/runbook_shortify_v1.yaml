@@ -1,0 +1,11 @@
+allowed_tools:
+  - requests.get
+  - openai.chat.completions
+
+required_steps:
+  - expand_url
+  - summarize
+
+budgets:
+  max_tokens: 500
+  max_cost_usd: 0.05

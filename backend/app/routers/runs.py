@@ -80,9 +80,6 @@ def list_runs(
 
     rows = db.execute(q).all()
 
-
-    runs = db.scalars(q).all()
-
     out: list[RunOut] = []
     for r, vid, vstatus, vat in rows:
         out.append(
