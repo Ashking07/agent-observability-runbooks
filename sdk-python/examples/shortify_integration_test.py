@@ -1,6 +1,6 @@
 import os
 import httpx
-from obs_sdk import ObsClient
+from veriops_sdk import ObsClient
 
 OBS_BASE_URL = os.getenv("OBS_BASE_URL", "http://localhost:8000")
 OBS_API_KEY = os.getenv("OBS_API_KEY", "dev-key")

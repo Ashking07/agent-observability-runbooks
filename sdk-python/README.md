@@ -15,3 +15,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -e .
+
+
+pip install veriOps-sdk
+from veriops_sdk import ObsClient

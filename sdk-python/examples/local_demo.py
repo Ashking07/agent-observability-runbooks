@@ -2,7 +2,7 @@ import logging
 import os
 from pathlib import Path
 
-from obs_sdk import ObsClient
+from veriops_sdk import ObsClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -10,18 +10,7 @@ logging.basicConfig(
 )
 
 HERE = Path(__file__).parent
-RUNBOOK_PATH = HERE / "runbook_shortify_v1.yaml"
-RUNBOOK_YAML = RUNBOOK_PATH.read_text(encoding="utf-8") if RUNBOOK_PATH.exists() else """\
-allowed_tools:
-  - requests.get
-  - openai.chat.completions
-required_steps:
-  - expand_url
-  - summarize
-budgets:
-  max_tokens: 500
-  max_cost_usd: 0.05
-"""
+RUNBOOK_YAML = (HERE / "runbook_shortify_v1.yaml").read_text(encoding="utf-8")
 
 BASE_URL = os.getenv("OBS_BASE_URL", "http://localhost:8000")
 API_KEY = os.getenv("OBS_API_KEY", "dev-key")
@@ -33,6 +22,10 @@ def main() -> None:
         base_url=BASE_URL,
         api_key=API_KEY,
         project_id=PROJECT_ID,
+        flush_interval_events=50,
+        max_batch_events=100,
+        max_retries=5,
+        raise_on_flush_error=False,  # do not crash host app
         on_result=lambda data: logging.getLogger("obs_sdk.hook").info("ingest result: %s", data),
         on_error=lambda e: logging.getLogger("obs_sdk.hook").warning("ingest error: %s", e),
     )
@@ -42,10 +35,12 @@ def main() -> None:
 
         with client.run(runbook="shortify_v1") as run:
             with run.step(name="expand_url", tool="requests.get", input={"url": long_url}) as s:
-                html_bytes = 42000
+                # Simulate work
+                html_bytes = 42_000
                 s.set_output({"bytes": html_bytes})
 
-            with run.step(name="summarize", tool="openai.chat.completions", input={"chars": 42000}) as s:
+            with run.step(name="summarize", tool="openai.chat.completions", input={"chars": 42_000}) as s:
+                # Simulate LLM
                 summary = "This is a short summary."
                 s.set_output({"summary": summary})
                 s.set_tokens_cost(tokens=220, cost_usd=0.0023)
