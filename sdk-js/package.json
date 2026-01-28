@@ -1,11 +1,40 @@
 {
   "name": "@veriops/sdk-js",
-  "version": "0.1.4",
+  "version": "0.1.8",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "description": "JavaScript SDK for VeriOps Observability Runbooks",
+  "author": "Ashwin Kapile <ashwinkapile2002@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ashking07/agent-observability-runbooks.git",
+    "directory": "sdk-js"
+  },
+  "homepage": "https://github.com/Ashking07/agent-observability-runbooks/tree/main/sdk-js",
+  "bugs": {
+    "url": "https://github.com/Ashking07/agent-observability-runbooks/issues"
+  },
+  "keywords": [
+    "observability",
+    "llm",
+    "agents",
+    "runbooks",
+    "validation",
+    "telemetry"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
@@ -17,5 +46,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@veriops/sdk-js": "^0.1.8"
   }
 }

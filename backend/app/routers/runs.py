@@ -9,6 +9,7 @@ import yaml
 from uuid import UUID
 import hashlib
 import json
+from fastapi import Response
 
 from ..db import get_db
 from ..schemas import RunOut, RunDetailOut, StepOut, RunValidationOut, RunValidationListOut
@@ -443,3 +444,24 @@ def validate_run(
 
     summary_payload["validation_id"] = str(val.id)
     return ValidateRunOut(status=val.status, reasons=reasons, summary=summary_payload)
+
+
+
+@router.delete(
+    "/runs/{run_id}",
+    status_code=204,
+    dependencies=[Depends(require_api_key)],
+)
+def delete_run(
+    run_id: UUID,
+    db: Session = Depends(get_db),
+):
+    run = db.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    db.delete(run)
+    db.commit()
+
+    # 204 No Content
+    return Response(status_code=204)

@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@veriops/sdk-js": "^0.1.4"
+  }
+}
