@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy import (
     String,
     DateTime,
@@ -135,6 +136,9 @@ class RunValidation(Base):
     __table_args__ = (
     Index("uq_run_validations_run_id_input_hash", "run_id", "input_hash", unique=True),
     )
+
+    policy_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("policies.id"), nullable=True)
+    policy_name: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 

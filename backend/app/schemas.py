@@ -129,3 +129,22 @@ class PolicyOut(BaseModel):
 
     class Config:
         from_attributes = True  # pydantic v2; for v1 use orm_mode=True
+
+
+
+class ValidationReason(BaseModel):
+    reason: str
+
+
+class ValidateRunIn(BaseModel):
+    runbook_yaml: Optional[str] = None
+    policy_id: Optional[UUID] = None
+
+
+class ValidateRunOut(BaseModel):
+    status: str
+    reasons: list[ValidationReason] = []
+    summary: dict
+
+    validation_id: Optional[UUID] = None
+    created_at: Optional[datetime] = None

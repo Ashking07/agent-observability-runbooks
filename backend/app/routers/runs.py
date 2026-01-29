@@ -13,8 +13,10 @@ from fastapi import Response
 
 from ..db import get_db
 from ..schemas import RunOut, RunDetailOut, StepOut, RunValidationOut, RunValidationListOut
-from ..models import Run, Step, RunValidation
+from ..models import Run, Step, RunValidation , Policy
 from ..settings import settings
+# Need to import ValidateRunIn from schemas
+from ..schemas import ValidateRunIn
 
 router = APIRouter(prefix="/v1", tags=["runs"])
 
@@ -23,10 +25,6 @@ def require_api_key(x_api_key: str | None = Header(default=None)):
     if x_api_key != settings.API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
     
-class ValidateRunIn(BaseModel):
-    # If omitted, we will use Run.runbook (if present)
-    runbook_yaml: Optional[str] = None
-
 
 class ValidationReason(BaseModel):
     code: str
@@ -194,6 +192,7 @@ def list_run_validations(
     )
 
 
+
 @router.post(
     "/runs/{run_id}/validate",
     response_model=ValidateRunOut,
@@ -228,25 +227,44 @@ def validate_run(
         total_tokens = sum(int(s.tokens or 0) for s in steps)
         total_cost = sum(float(s.cost_usd or 0.0) for s in steps)
 
-    # 3) Load runbook text (request body > stored run.runbook)
-    runbook_text = (payload.runbook_yaml or (run.runbook or "")).strip()
+    # 3) Resolve runbook text (policy_id > request body > stored run.runbook)
+    runbook_text = ""
+    policy_updated_at = None
+    policy_name = None
+
+    if payload.policy_id is not None:
+        policy = db.scalars(
+            select(Policy).where(
+                Policy.id == payload.policy_id,
+                Policy.is_active.is_(True),
+            )
+        ).first()
+        if not policy:
+            raise HTTPException(status_code=404, detail="Policy not found (or inactive)")
+        runbook_text = (policy.runbook_yaml or "").strip()
+        policy_updated_at = policy.updated_at
+        policy_name = policy.name
+    else:
+        runbook_text = (payload.runbook_yaml or (run.runbook or "")).strip()
+
     if not runbook_text:
         return ValidateRunOut(
             status="failed",
             reasons=[
                 ValidationReason(
                     code="runbook_missing",
-                    message="No runbook provided. Supply runbook_yaml or store one on run.start.",
+                    message="No runbook provided. Supply runbook_yaml, policy_id, or store one on run.start.",
                 )
             ],
             summary={"run_id": str(run_id)},
         )
 
-    # 4) Parse YAML
+    # 4) Parse YAML once + build canonical snapshot
     try:
         runbook = yaml.safe_load(runbook_text) or {}
         if not isinstance(runbook, dict):
             raise ValueError("Runbook must be a YAML mapping/object at the top level.")
+        canonical_runbook_text = yaml.safe_dump(runbook, sort_keys=True).strip()
     except Exception as e:
         return ValidateRunOut(
             status="failed",
@@ -260,10 +278,13 @@ def validate_run(
             summary={"run_id": str(run_id)},
         )
 
-    # 5) Build deterministic signature + input_hash (NOW all vars exist)
+    # 5) Build deterministic signature + input_hash
+    # IMPORTANT: include policy_updated_at so editing the policy breaks idempotency.
     signature = {
         "run_id": str(run_id),
-        "runbook_yaml": runbook_text,
+        "policy_id": (str(payload.policy_id) if payload.policy_id else None),
+        "policy_updated_at": (policy_updated_at.isoformat() if policy_updated_at else None),
+        "runbook_yaml": canonical_runbook_text,
         "total_tokens": total_tokens,
         "total_cost_usd": total_cost,
         "steps": [
@@ -280,9 +301,7 @@ def validate_run(
             for s in steps
         ],
     }
-    input_hash = hashlib.sha256(
-        json.dumps(signature, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    input_hash = hashlib.sha256(json.dumps(signature, sort_keys=True).encode("utf-8")).hexdigest()
 
     # 6) Idempotency: return existing validation if same input_hash
     existing = db.scalars(
@@ -306,6 +325,8 @@ def validate_run(
             status=existing.status,
             reasons=[ValidationReason(**x) for x in (existing.reasons_json or [])],
             summary=summary,
+            validation_id=existing.id,
+            created_at=existing.created_at,
         )
 
     # 7) Evaluate rules
@@ -352,10 +373,10 @@ def validate_run(
                 )
             )
 
-    # Rule 3: budgets
+    # Rule 3: budgets (support both key styles)
     budgets = runbook.get("budgets") if isinstance(runbook.get("budgets"), dict) else {}
-    max_tokens = budgets.get("max_total_tokens")
-    max_cost = budgets.get("max_total_cost_usd")
+    max_tokens = budgets.get("max_tokens") or budgets.get("max_total_tokens")
+    max_cost = budgets.get("max_cost_usd") or budgets.get("max_total_cost_usd")
 
     if max_tokens is not None:
         try:
@@ -412,14 +433,15 @@ def validate_run(
     if run.status != "error":
         run.status = "passed" if status == "passed" else "failed"
 
-    # Persist validation row (idempotent)
     val = RunValidation(
         run_id=run_id,
         status=status,
         input_hash=input_hash,
         reasons_json=reasons_payload,
         summary_json=summary_payload,
-        runbook_yaml=runbook_text,
+        runbook_yaml=canonical_runbook_text,                 # snapshot of what was validated
+        policy_id=payload.policy_id,                         # requires DB/model column
+        policy_name=policy_name,                             # optional but helpful
     )
     db.add(val)
 
@@ -443,7 +465,16 @@ def validate_run(
         db.commit()
 
     summary_payload["validation_id"] = str(val.id)
-    return ValidateRunOut(status=val.status, reasons=reasons, summary=summary_payload)
+
+    return ValidateRunOut(
+        status=val.status,
+        reasons=[ValidationReason(**r) for r in (val.reasons_json or [])],
+        summary={**(val.summary_json or {}), "validation_id": str(val.id)},
+        validation_id=val.id,
+        created_at=val.created_at,
+    )
+
+
 
 
 
