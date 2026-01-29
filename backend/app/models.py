@@ -11,7 +11,10 @@ from sqlalchemy import (
     Enum,
     CheckConstraint,
     Index,
-    Text
+    Text,
+    Column, 
+    Boolean, 
+    func
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -133,3 +136,16 @@ class RunValidation(Base):
     Index("uq_run_validations_run_id_input_hash", "run_id", "input_hash", unique=True),
     )
 
+
+
+class Policy(Base):
+    __tablename__ = "policies"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id = Column(Text, nullable=False, index=True)
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    runbook_yaml = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

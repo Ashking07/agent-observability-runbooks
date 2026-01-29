@@ -104,3 +104,28 @@ class RunValidationOut(BaseModel):
 
 class RunValidationListOut(BaseModel):
     validations: list[RunValidationOut]
+
+
+class PolicyCreateIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    runbook_yaml: str
+
+class PolicyUpdateIn(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    runbook_yaml: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class PolicyOut(BaseModel):
+    id: UUID
+    project_id: str
+    name: str
+    description: Optional[str] = None
+    runbook_yaml: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True  # pydantic v2; for v1 use orm_mode=True
